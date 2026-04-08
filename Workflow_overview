@@ -1,0 +1,58 @@
+Translatomer Workflow Overview (from files to model output tensor shapes)
+
+[Raw files]
+  ├─ FASTA: data/<assembly>/<assembly>.fa
+  ├─ RNA bigWig: data/<assembly>/<cell>/<study>/input_features/rnaseq.bw
+  ├─ Ribo bigWig: data/<assembly>/<cell>/<study>/output_features/riboseq.bw
+  └─ BED regions: data/<assembly>/gene_region_24chr.1.bed (hg38 example)
+
+        │  generate_features_4rv.py
+        ▼
+
+[After preprocessing]
+  ├─ RNA input matrix (float32, mmap-loadable)
+  │    per region: (65536,)
+  │    all regions: (N, 65536)
+  │
+  └─ Ribo target matrix (torch.save)
+       per region: (1024,)   # 65536 averaged by 64bp => 1024 bins
+       all regions: (N, 1024)
+
+        │  train_all_11fold.py + TensorLoader + Dataset
+        ▼
+
+[Dataset __getitem__ (single sample)]
+  ├─ sequence_one_hot: (65536, 5)    # A/T/C/G/N
+  ├─ input_features:   (65536,)      # RNA track
+  ├─ output_features:  (1024,)       # Ribo target
+  └─ optional reverse-complement augmentation on '-' strand
+
+        │  batch collation
+        ▼
+
+[One batch]
+  ├─ seq:    (B, 65536, 5)
+  ├─ epi:    (B, 65536) -> unsqueeze(2) -> (B, 65536, 1)
+  └─ inputs: cat(seq, epi, dim=2) -> (B, 65536, 6)
+     targets: (B, 1024)
+
+        │  TransModel.forward
+        ▼
+
+[Inside model]
+  1) transpose -> (B, 6, 65536)
+  2) Conv1d(6->512, k129,s128,p64) -> (B, 512, 512)
+  3) transpose -> (B, 512, 512)     # (B, token_len=512, hidden=512)
+  4) 12-layer Transformer -> (B, 512, 512)
+  5) transpose -> (B, 512, 512)
+  6) Conv1d(512->1, k3,s1,p1) -> (B, 1, 512)
+  7) Linear(512->1024) on last dim -> (B, 1, 1024)
+  8) squeeze(1) + ReLU -> (B, 1024)
+
+        │
+        ▼
+
+[Output]
+  pred: (B, 1024) aligned with targets: (B, 1024)
+  loss: MSE
+  metrics: Pearson / Spearman
